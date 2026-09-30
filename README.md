@@ -31,6 +31,13 @@ offline.
   English or a translation are skipped. Multiple tags in one cell can be
   separated with commas or semicolons. From Google Sheets use File →
   Download; from Numbers use Share → Export (Excel or CSV).
+- **Photos on cards.** Add a photo when adding or editing a word (camera or
+  photo library). It's shrunk to about 1000px so it stays small. Photos show
+  as thumbnails in the word list and on the answer side of the card.
+  **Picture cards** sometimes replace the prompt with just the photo: "What
+  is this in Spanish?". Set how often under Practice → Picture cards (Off,
+  Sometimes ≈ 30%, Often ≈ 65% of English → language cards that have a
+  photo).
 - **Tested both ways.** English → language, language → English, or both.
   Each direction is tracked separately.
 - **Tags.** Practice every word, or pick one or more tags.
@@ -50,11 +57,11 @@ offline.
 
 ## Where your data lives
 
-Everything is saved on the device (browser `localStorage`), like Footy Stats
-Counter. There's no account and no server. It works fully offline.
+Everything is saved on the device, like Footy Stats Counter: words and
+progress in browser `localStorage`, photos in the browser's IndexedDB. There's no account and no server. It works fully offline.
 
 This means your words don't sync between devices. Use **Progress → Backup →
-Save backup** now and then to save a `.json` file (to Files or iCloud Drive),
+Save backup** now and then to save a `.json` file (to Files or iCloud Drive; photos are included),
 and **Restore from backup** to load it onto another phone.
 
 On iPhone, the home-screen app and Safari keep **separate** storage, so add

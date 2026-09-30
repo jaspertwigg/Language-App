@@ -29,6 +29,7 @@ const ACH = [
   { id: 'streak30', name: 'Habit formed', desc: '30-day streak', test: c => c.bestStreak >= 30 },
   { id: 'master10', name: 'Sticky', desc: 'Master 10 words both ways', test: c => c.mastered >= 10 },
   { id: 'master50', name: 'Fluent-ish', desc: 'Master 50 words both ways', test: c => c.mastered >= 50 },
+  { id: 'photo10', name: 'Picture this', desc: 'Add photos to 10 words', test: c => c.photos >= 10 },
   { id: 'poly', name: 'Polyglot', desc: 'Words in 2 languages', test: c => c.langsWithWords >= 2 },
 ];
 
@@ -36,7 +37,7 @@ const ACH = [
 const S = { langs: {}, cards: {}, stats: defaultStats(), ready: false };
 function defaultStats() { return { xp: 0, days: {}, goal: 20, ach: {}, reviews: 0, bestCombo: 0, bestStreak: 0, perfect: false }; }
 const PREF_KEY = 'wordstack.prefs.v1', LOCAL_KEY = 'wordstack.data.v1';
-let pref = { lang: null, dir: 'both', mode: 'due', tags: [], size: 20 };
+let pref = { lang: null, dir: 'both', mode: 'due', tags: [], size: 20, photo: 'some' };
 try { Object.assign(pref, JSON.parse(localStorage.getItem(PREF_KEY) || '{}')); } catch (e) {}
 function savePref() { try { localStorage.setItem(PREF_KEY, JSON.stringify(pref)); } catch (e) {} }
 let view = 'practice';
@@ -45,7 +46,7 @@ let wordQuery = '', wordTag = '';
 
 function blankSide(x) { return Object.assign({ box: 0, due: 0, right: 0, wrong: 0, last: 0 }, x || {}); }
 function normCard(d, id) {
-  return { id, lang: d.lang, en: d.en || '', tr: d.tr || '', tags: Array.isArray(d.tags) ? d.tags : [], note: d.note || '', created: d.created || 0,
+  return { id, lang: d.lang, en: d.en || '', tr: d.tr || '', tags: Array.isArray(d.tags) ? d.tags : [], note: d.note || '', photo: !!d.photo, created: d.created || 0,
     s: { f: blankSide(d.s && d.s.f), b: blankSide(d.s && d.s.b) } };
 }
 
@@ -75,11 +76,64 @@ function initStore() {
   try { navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch (e) {}
 }
 
+// ---------- photos (IndexedDB, keyed by card id) ----------
+// Photos are too big for localStorage, so they live in IndexedDB as
+// shrunk JPEGs; a card just carries a photo: true flag.
+const PhotoDB = (() => {
+  let dbp = null;
+  const open = () => dbp || (dbp = new Promise((res, rej) => {
+    const r = indexedDB.open('wordstack-photos', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('photos');
+    r.onsuccess = () => res(r.result); r.onerror = () => { dbp = null; rej(r.error); };
+  }));
+  const run = (mode, fn) => open().then(db => new Promise((res, rej) => {
+    const t = db.transaction('photos', mode), req = fn(t.objectStore('photos'));
+    t.oncomplete = () => res(req && req.result); t.onerror = () => rej(t.error); t.onabort = () => rej(t.error);
+  }));
+  return {
+    get: id => run('readonly', st => st.get(id)),
+    put: (id, blob) => run('readwrite', st => st.put(blob, id)),
+    del: id => run('readwrite', st => st.delete(id)),
+    clear: () => run('readwrite', st => st.clear()),
+  };
+})();
+const photoURLs = {}; // card id -> object URL, or null when missing
+async function photoURL(id) {
+  if (id in photoURLs) return photoURLs[id];
+  let blob = null;
+  try { blob = await PhotoDB.get(id); } catch (e) {}
+  return (photoURLs[id] = blob ? URL.createObjectURL(blob) : null);
+}
+function forgetPhoto(id) { if (photoURLs[id]) URL.revokeObjectURL(photoURLs[id]); delete photoURLs[id]; }
+function deletePhoto(id) { forgetPhoto(id); PhotoDB.del(id).catch(() => {}); }
+function hydratePhotos(root) {
+  $$('img[data-photo]', root).forEach(img => photoURL(img.dataset.photo).then(u => { if (u) img.src = u; else img.remove(); }));
+}
+function resizeImage(file, max = 1000) {
+  return new Promise((res, rej) => {
+    const url = URL.createObjectURL(file), img = new Image();
+    img.onload = () => {
+      const k = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+      const cv = document.createElement('canvas');
+      cv.width = Math.max(1, Math.round(img.naturalWidth * k)); cv.height = Math.max(1, Math.round(img.naturalHeight * k));
+      cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height); URL.revokeObjectURL(url);
+      cv.toBlob(b => b ? res(b) : rej(new Error('encode')), 'image/jpeg', 0.82);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); rej(new Error('decode')); };
+    img.src = url;
+  });
+}
+const blobToDataURL = blob => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(blob); });
+
 // ---------- backup ----------
 async function exportBackup() {
   const stripped = {};
-  for (const [id, c] of Object.entries(S.cards)) stripped[id] = stripId(c);
-  const json = JSON.stringify({ app: 'wordstack', version: 1, exported: new Date().toISOString(), langs: S.langs, cards: stripped, stats: S.stats }, null, 1);
+  const photos = {};
+  for (const [id, c] of Object.entries(S.cards)) {
+    stripped[id] = stripId(c);
+    if (c.photo) { try { const b = await PhotoDB.get(id); if (b) photos[id] = await blobToDataURL(b); } catch (e) {} }
+  }
+  const json = JSON.stringify({ app: 'wordstack', version: 2, exported: new Date().toISOString(), langs: S.langs, cards: stripped, stats: S.stats, photos });
   const name = 'wordstack-backup-' + today() + '.json';
   const file = new File([json], name, { type: 'application/json' });
   try {
@@ -91,11 +145,18 @@ async function exportBackup() {
 }
 function importBackup(file) {
   const r = new FileReader();
-  r.onload = () => {
+  r.onload = async () => {
     let d;
     try { d = JSON.parse(r.result); } catch (e) { toast('That file isn\'t a Wordstack backup.'); return; }
     if (!d || d.app !== 'wordstack' || !d.cards) { toast('That file isn\'t a Wordstack backup.'); return; }
-    applyData(d); saveLocal(); sess = null; pref.tags = []; afterData();
+    applyData(d);
+    Object.keys(photoURLs).forEach(forgetPhoto);
+    try {
+      await PhotoDB.clear();
+      for (const [id, url] of Object.entries(d.photos || {})) await PhotoDB.put(id, await (await fetch(url)).blob());
+    } catch (e) { toast('Some photos couldn\'t be restored.'); }
+    for (const c of Object.values(S.cards)) if (c.photo && !(d.photos || {})[c.id]) c.photo = false;
+    saveLocal(); sess = null; pref.tags = []; afterData();
     $('#view').innerHTML = ''; render();
     toast('Restored ' + Object.keys(S.cards).length + ' words');
   };
@@ -158,7 +219,7 @@ function achContext() {
   return {
     reviews: S.stats.reviews, words: cards.length, bestCombo: S.stats.bestCombo, perfect: S.stats.perfect,
     goalDays: Object.values(S.stats.days).filter(v => v >= S.stats.goal).length, bestStreak: Math.max(S.stats.bestStreak || 0, streak()),
-    mastered: cards.filter(c => c.s.f.box >= MASTER_BOX && c.s.b.box >= MASTER_BOX).length, langsWithWords,
+    mastered: cards.filter(c => c.s.f.box >= MASTER_BOX && c.s.b.box >= MASTER_BOX).length, langsWithWords, photos: cards.filter(c => c.photo).length,
   };
 }
 function checkAch() {
@@ -224,6 +285,7 @@ function renderPractice() {
       <button class="chip" data-act="tag-all" aria-pressed="${!pref.tags.length}">All words <span class="n">${cs.length}</span></button>
       ${tags.map(([t, k]) => `<button class="chip" data-act="tag" data-tag="${esc(t)}" aria-pressed="${pref.tags.includes(t)}">${esc(t)} <span class="n">${k}</span></button>`).join('')}
     </div></div>` : ''}
+    ${scope.some(c => c.photo) ? `<div class="field"><span class="eyebrow">Picture cards</span>${seg('photo', [['off', 'Off'], ['some', 'Sometimes'], ['often', 'Often']])}</div>` : ''}
     <div class="field"><span class="eyebrow">Session length</span>${seg('size', [[10, '10'], [20, '20'], [50, '50']])}</div>
     ${n > 0 ? `<button class="btn primary big" data-act="start">Start · ${n} card${n === 1 ? '' : 's'}</button>`
       : `<button class="btn primary big" data-act="shuffle-instead">Nothing due. Shuffle practice instead</button>`}
@@ -279,10 +341,17 @@ function buildQueue() {
   } else {
     items = weightedSample(items, Math.min(pref.size, items.length));
   }
-  return spreadPairs(items.map(i => ({ ...i, retry: 0 })));
+  // occasionally swap a prompt for the card's photo: "what is this in <language>?"
+  const rate = { off: 0, some: 0.3, often: 0.65 }[pref.photo] ?? 0.3;
+  return spreadPairs(items.map(i => ({ ...i, retry: 0, pic: !!S.cards[i.id].photo && (i.d === 'f' || pref.dir === 'b') && Math.random() < rate })));
 }
-function startSession(queue, label) {
-  if (!queue.length) return;
+let starting = false;
+async function startSession(queue, label) {
+  if (!queue.length || starting) return;
+  starting = true;
+  try { await Promise.all([...new Set(queue.map(q => q.id))].filter(id => S.cards[id] && S.cards[id].photo).map(photoURL)); } finally { starting = false; }
+  // photos were loaded above so cards never flash in empty
+  queue.forEach(q => { if (q.pic && !photoURLs[q.id]) q.pic = false; });
   sess = { queue, i: 0, flipped: false, right: 0, wrong: 0, xp: 0, combo: 0, best: 0, missed: {}, label, mode: pref.mode, startLevel: level(S.stats.xp), done: false };
   $('#view').innerHTML = ''; renderSession();
 }
@@ -293,9 +362,10 @@ function renderSession() {
   if (!it) { finishSession(); return; }
   if (!c) { sess.queue.splice(sess.i, 1); renderSession(); return; } // card was deleted elsewhere
   const l = S.langs[c.lang] || curLang(), lname = l ? l.name : 'Translation';
-  const fwd = it.d === 'f';
+  const pic = it.pic && photoURLs[c.id], photo = c.photo && photoURLs[c.id];
+  const fwd = it.d === 'f' || pic;
   const prompt = fwd ? c.en : c.tr, answer = fwd ? c.tr : c.en;
-  const from = fwd ? 'English' : lname, to = fwd ? lname : 'English';
+  const from = pic ? 'Picture' : fwd ? 'English' : lname, to = fwd ? lname : 'English';
   const side = c.s[it.d];
   const pips = Array.from({ length: 6 }, (_, k) => `<i class="${k < side.box ? 'on' : ''}"></i>`).join('');
   const canSpeak = 'speechSynthesis' in window && voiceFor(lname);
@@ -315,12 +385,12 @@ function renderSession() {
         <div class="flip">
           <div class="face front">
             <div class="head"><span class="eyebrow">${esc(from)} → ${esc(to)}${it.retry ? ' · again' : ''}</span>${fwd ? '<span></span>' : spk(prompt)}</div>
-            <div class="word">${esc(prompt)}</div>
-            <div class="foot"><span>Tap to reveal</span><span class="pips" title="Box ${side.box} of 6">${pips}</span></div>
+            ${pic ? `<div class="pic"><img src="${photo}" alt="Photo prompt"></div>` : `<div class="word">${esc(prompt)}</div>`}
+            <div class="foot"><span>${pic ? 'What is this in ' + esc(lname) + '?' : 'Tap to reveal'}</span><span class="pips" title="Box ${side.box} of 6">${pips}</span></div>
           </div>
           <div class="face back">
             <div class="head"><span class="eyebrow">${esc(to)}</span>${fwd ? spk(answer) : '<span></span>'}</div>
-            <div class="mid"><div class="prompt-small">${esc(prompt)}</div><div class="word">${esc(answer)}</div>${c.note ? `<div class="note">${esc(c.note)}</div>` : ''}</div>
+            <div class="mid">${photo ? `<img class="back-thumb" src="${photo}" alt="">` : ''}<div class="prompt-small">${esc(prompt)}</div><div class="word">${esc(answer)}</div>${c.note ? `<div class="note">${esc(c.note)}</div>` : ''}</div>
             <div class="foot"><span>${c.tags.map(esc).join(' · ')}</span><span class="pips">${pips}</span></div>
           </div>
         </div>
@@ -395,7 +465,7 @@ function answer(ok) {
     sess.missed[it.id + it.d] = it;
     if (it.retry < 2) { // see it again a few cards later
       const at = Math.min(sess.queue.length, sess.i + 3 + Math.floor(Math.random() * 3));
-      sess.queue.splice(at, 0, { id: it.id, d: it.d, retry: it.retry + 1 });
+      sess.queue.splice(at, 0, { id: it.id, d: it.d, pic: it.pic, retry: it.retry + 1 });
     }
   }
   sess.best = Math.max(sess.best, sess.combo);
@@ -479,10 +549,11 @@ function renderWordList() {
   $('#wlist').innerHTML = !total ? `<div class="empty"><h2>No words yet</h2><p>Add words one at a time, or paste a list from your notes.</p></div>`
     : !cs.length ? `<div class="empty"><p>No words match.</p></div>`
     : `<div class="eyebrow">${cs.length} of ${total} words</div>` + cs.map(c => `<button class="wrow" data-act="edit-word" data-id="${c.id}">
-      <span class="pair"><span class="tr">${esc(c.tr)}</span><span class="en">${esc(c.en)}</span></span>
+      <span class="pair">${c.photo ? `<img class="wthumb" data-photo="${c.id}" alt="">` : ''}<span class="tr">${esc(c.tr)}</span><span class="en">${esc(c.en)}</span></span>
       <span class="mast"><span class="m">EN→${esc(langCode(l.name))} ${bar(c.s.f)}</span><span class="m">${esc(langCode(l.name))}→EN ${bar(c.s.b)}</span></span>
       ${c.tags.length ? `<span class="tags">${c.tags.map(t => `<span class="tag">${esc(t)}</span>`).join('')}</span>` : ''}
     </button>`).join('');
+  hydratePhotos($('#wlist'));
 }
 function parseTags(s) { return [...new Set(String(s).split(/[,#]/).map(t => t.trim().toLowerCase()).filter(Boolean))]; }
 function wordSheet(id) {
@@ -495,6 +566,15 @@ function wordSheet(id) {
     <label>Tags<input class="input" id="fTags" autocomplete="off" value="${esc(c ? c.tags.join(', ') : (wordTag || ''))}" placeholder="animals, body parts"></label>
     ${tags.length ? `<div class="chips" id="tagSuggest">${tags.map(t => `<button type="button" class="chip" data-act="add-tag" data-tag="${esc(t)}">+ ${esc(t)}</button>`).join('')}</div>` : ''}
     <label>Note (optional)<input class="input" id="fNote" autocomplete="off" value="${esc(c ? c.note : '')}" placeholder="gender, example sentence, memory trick"></label>
+    <div class="photo-field">
+      <div class="photo-prev" id="fPhotoPrev"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="15" rx="2"/><circle cx="12" cy="12.5" r="3.5"/><path d="M8 5l1.5-2h5L16 5"/></svg></div>
+      <div class="photo-btns">
+        <span class="map-label">Photo (optional)</span>
+        <span class="muted" style="font-size:13px">Picture cards test you with just the photo.</span>
+        <span class="chips"><label class="btn ghost" for="fPhoto" id="fPhotoLbl">Add a photo</label><button type="button" class="linkish" id="fPhotoDel" hidden>Remove</button></span>
+      </div>
+      <input type="file" id="fPhoto" accept="image/*" hidden>
+    </div>
     <div class="actions">
       ${c ? `<button type="button" class="btn danger" data-act="del-word" data-id="${c.id}">Delete</button>` : `<button type="submit" class="btn ghost" data-more="1">Save and add another</button>`}
       <button type="submit" class="btn primary">Save</button>
@@ -502,7 +582,27 @@ function wordSheet(id) {
     <div id="delConfirm"></div>
   </form>`, sheet => {
     const f = $('#wordForm', sheet);
-    setTimeout(() => $('#fEn', sheet).focus(), 60);
+    if (!c) setTimeout(() => $('#fEn', sheet).focus(), 60);
+    const prev = $('#fPhotoPrev', sheet), blank = prev.innerHTML;
+    let photoState = 'keep', newBlob = null;
+    const showPhoto = url => {
+      prev.innerHTML = url ? `<img src="${url}" alt="">` : blank;
+      $('#fPhotoLbl', sheet).textContent = url ? 'Change photo' : 'Add a photo';
+      $('#fPhotoDel', sheet).hidden = !url;
+    };
+    if (c && c.photo) photoURL(c.id).then(showPhoto);
+    $('#fPhoto', sheet).addEventListener('change', async e => {
+      const file = e.target.files[0]; e.target.value = ''; if (!file) return;
+      try { newBlob = await resizeImage(file); photoState = 'new'; showPhoto(URL.createObjectURL(newBlob)); }
+      catch (err) { toast('Couldn\'t open that photo. Try a JPEG or PNG.'); }
+    });
+    $('#fPhotoDel', sheet).addEventListener('click', () => { photoState = 'remove'; newBlob = null; showPhoto(null); });
+    const applyPhoto = card => {
+      if (photoState === 'new') {
+        const blob = newBlob; card.photo = true; forgetPhoto(card.id);
+        PhotoDB.put(card.id, blob).then(() => refreshBehind()).catch(() => { card.photo = false; saveLocal(); toast('Couldn\'t save the photo. Your phone may be low on space.'); });
+      } else if (photoState === 'remove') { card.photo = false; deletePhoto(card.id); }
+    };
     f.addEventListener('submit', e => {
       e.preventDefault();
       const en = $('#fEn', sheet).value.trim(), tr = $('#fTr', sheet).value.trim();
@@ -510,17 +610,19 @@ function wordSheet(id) {
       const tagsV = parseTags($('#fTags', sheet).value), note = $('#fNote', sheet).value.trim();
       if (c) {
         Object.assign(c, { en, tr, tags: tagsV, note });
+        applyPhoto(c);
         write('cards', c.id, stripId(c)); toast('Saved');
       } else {
         const dup = langCards(pref.lang).find(x => x.en.toLowerCase() === en.toLowerCase() && x.tr.toLowerCase() === tr.toLowerCase());
         if (dup) { toast('That word is already in your deck.'); return; }
         const nid = uid('c');
         S.cards[nid] = normCard({ lang: pref.lang, en, tr, tags: tagsV, note, created: Date.now() }, nid);
+        applyPhoto(S.cards[nid]);
         write('cards', nid, stripId(S.cards[nid])); toast('Added ' + tr);
         checkAch();
       }
       const more = e.submitter && e.submitter.dataset.more;
-      if (more) { $('#fEn', sheet).value = ''; $('#fTr', sheet).value = ''; $('#fNote', sheet).value = ''; $('#fEn', sheet).focus(); }
+      if (more) { $('#fEn', sheet).value = ''; $('#fTr', sheet).value = ''; $('#fNote', sheet).value = ''; photoState = 'keep'; newBlob = null; showPhoto(null); $('#fEn', sheet).focus(); }
       else closeSheet();
       refreshBehind();
     });
@@ -789,7 +891,7 @@ function editLang(id) {
   });
 }
 function deleteLang(id) {
-  langCards(id).forEach(c => { delete S.cards[c.id]; write('cards', c.id, null); });
+  langCards(id).forEach(c => { if (c.photo) deletePhoto(c.id); delete S.cards[c.id]; write('cards', c.id, null); });
   delete S.langs[id]; write('languages', id, null);
   if (pref.lang === id) pref.lang = Object.keys(S.langs)[0] || null;
   pref.tags = []; savePref(); sess = null; closeSheet(); $('#view').innerHTML = ''; render(); toast('Deleted');
@@ -840,7 +942,7 @@ function renderProgress() {
     ${langs.length ? `<div class="panel"><h3>Mastery by language</h3><p class="muted" style="margin:4px 0 0;font-size:13px">Each word counts twice, once per direction.</p>${langRows}
       <div class="legend"><span><i class="c-mast"></i>Mastered</span><span><i class="c-fam"></i>Familiar</span><span><i class="c-learn"></i>Learning</span><span><i class="c-new"></i>New</span></div></div>` : ''}
     ${tricky.length ? `<div class="panel"><h3>Trickiest ${esc(l.name)} words</h3><div class="tricky">${tricky.map(x => `<div><span>${esc(x.d === 'f' ? x.c.en + ' → ' + x.c.tr : x.c.tr + ' → ' + x.c.en)}</span><span class="pct">${x.s.wrong}/${x.s.right + x.s.wrong} missed</span></div>`).join('')}</div></div>` : ''}
-    <div class="panel"><h3>Backup</h3><p class="muted" style="margin:4px 0 12px;font-size:13px">Your words are saved on this device only. Save a backup file now and then (to Files or iCloud Drive) so you can restore them on a new phone.</p>
+    <div class="panel"><h3>Backup</h3><p class="muted" style="margin:4px 0 12px;font-size:13px">Your words, photos and progress are saved on this device only. Save a backup file now and then (to Files or iCloud Drive) so you can restore them on a new phone.</p>
       <div class="chips"><button class="btn primary" data-act="export">Save backup</button><label class="btn ghost" for="importFile">Restore from backup</label><input type="file" id="importFile" accept="application/json,.json" hidden></div></div>
     <div><h3 style="margin-bottom:10px">Achievements <span class="count">${Object.keys(S.stats.ach).length}/${ACH.length}</span></h3>
       <div class="ach-grid">${ACH.map(a => `<div class="ach${S.stats.ach[a.id] ? ' on' : ''}"><b>${esc(a.name)}</b><span>${esc(a.desc)}</span></div>`).join('')}</div></div>
@@ -920,7 +1022,7 @@ document.addEventListener('click', e => {
       box.innerHTML = `<div class="confirm"><span>Delete this word and its progress?</span><button type="button" class="btn danger" data-act="del-word-yes" data-id="${id}" style="background:var(--miss);color:var(--paper)">Delete</button></div>`;
       break;
     }
-    case 'del-word-yes': { const id = a.dataset.id; delete S.cards[id]; write('cards', id, null); closeSheet(); refreshBehind(); toast('Deleted'); break; }
+    case 'del-word-yes': { const id = a.dataset.id; if (S.cards[id] && S.cards[id].photo) deletePhoto(id); delete S.cards[id]; write('cards', id, null); closeSheet(); refreshBehind(); toast('Deleted'); break; }
     case 'wtag': wordTag = a.dataset.tag; renderWordList(); break;
     case 'export': exportBackup(); break;
     case 'examples': loadExamples(); break;
