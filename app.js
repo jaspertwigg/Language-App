@@ -200,7 +200,7 @@ function renderPractice() {
   const cs = langCards(pref.lang);
   if (!cs.length) {
     v.innerHTML = `<div class="empty"><h2>Your ${esc(l.name)} deck is empty</h2><p>Add some words you want to learn. Tag them (animals, food, verbs) so you can drill one topic at a time.</p>
-      <div class="chips"><button class="btn primary" data-act="add-word">Add a word</button><button class="btn ghost" data-act="bulk">Paste a list</button></div></div>`;
+      <div class="chips" style="justify-content:center"><button class="btn primary" data-act="add-word">Add a word</button><button class="btn ghost" data-act="bulk">Paste a list</button><button class="btn ghost" data-act="import">Import a spreadsheet</button></div></div>`;
     return;
   }
   const now = Date.now(), dirs = dirsFor(), scope = scopeCards();
@@ -456,7 +456,7 @@ function renderWords() {
   if (!$('#wlist')) {
     v.innerHTML = `<div class="toolbar">
       <div class="row"><input class="input" id="wSearch" type="search" placeholder="Search ${esc(l.name)} or English" autocomplete="off"></div>
-      <div class="row"><button class="btn primary" data-act="add-word" style="flex:1">Add word</button><button class="btn ghost" data-act="bulk" style="flex:1">Paste a list</button></div>
+      <div class="row"><button class="btn primary" data-act="add-word" style="flex:1">Add word</button><button class="btn ghost" data-act="bulk" style="flex:1">Paste list</button><button class="btn ghost" data-act="import" style="flex:1">Spreadsheet</button></div>
       <div class="chips" id="wTags"></div>
     </div><div class="wlist" id="wlist"></div>`;
     $('#wSearch').value = wordQuery;
@@ -562,6 +562,186 @@ function bulkSheet() {
       toast(added ? `Added ${added} word${added === 1 ? '' : 's'}` + (rows.length > added ? ` (${rows.length - added} already there)` : '') : 'All of those are already in your deck.');
       checkAch(); closeSheet(); refreshBehind();
     });
+  });
+}
+
+// ---------- spreadsheet import ----------
+const XICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>';
+const IMPORT_FIELDS = [
+  { key: 'en', label: () => 'English', req: true, guess: /^(english|en|eng|word|words|term|front|question|prompt)$/i },
+  { key: 'tr', label: () => (curLang() ? curLang().name : 'Translation'), req: true, guess: /^(translation|translated|meaning|back|answer|foreign|target|definition)$/i },
+  { key: 'tags', label: () => 'Tags', guess: /^(tags?|categor(y|ies)|topics?|groups?|themes?|units?|lessons?|chapters?|sets?|decks?)$/i },
+  { key: 'note', label: () => 'Note', guess: /^(notes?|examples?|comments?|hints?|gender|sentences?|context|usage)$/i },
+  { key: 'lang', label: () => 'Language', guess: /^(language|lang)$/i },
+];
+let xlsxLoading = null;
+function loadXLSX() {
+  if (window.XLSX) return Promise.resolve(window.XLSX);
+  return xlsxLoading || (xlsxLoading = new Promise((res, rej) => {
+    const s = document.createElement('script'); s.src = 'vendor/xlsx.full.min.js';
+    s.onload = () => res(window.XLSX); s.onerror = () => { xlsxLoading = null; s.remove(); rej(new Error('load')); };
+    document.head.appendChild(s);
+  }));
+}
+function parseCSV(text) {
+  text = text.replace(/^﻿/, '');
+  const first = text.split(/\r?\n/, 1)[0];
+  const delim = ['\t', ';', ','].map(d => [d, first.split(d).length]).sort((a, b) => b[1] - a[1])[0][0];
+  const rows = []; let row = [], f = '', q = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (q) { if (ch === '"') { if (text[i + 1] === '"') { f += '"'; i++; } else q = false; } else f += ch; }
+    else if (ch === '"' && f === '') q = true;
+    else if (ch === delim) { row.push(f); f = ''; }
+    else if (ch === '\n' || ch === '\r') { if (ch === '\r' && text[i + 1] === '\n') i++; row.push(f); rows.push(row); row = []; f = ''; }
+    else f += ch;
+  }
+  if (f || row.length) { row.push(f); rows.push(row); }
+  return rows;
+}
+async function readSpreadsheet(file) {
+  const clean = rows => rows.map(r => r.map(c => String(c ?? '').trim())).filter(r => r.some(Boolean));
+  if (/\.(csv|tsv|txt)$/i.test(file.name) || /^text\//.test(file.type)) return [{ name: file.name, rows: clean(parseCSV(await file.text())) }];
+  const X = await loadXLSX();
+  const wb = X.read(await file.arrayBuffer(), { type: 'array' });
+  return wb.SheetNames.map(n => ({ name: n, rows: clean(X.utils.sheet_to_json(wb.Sheets[n], { header: 1, raw: false, defval: '', blankrows: false })) })).filter(s => s.rows.length);
+}
+const colLetter = i => (i >= 26 ? colLetter(Math.floor(i / 26) - 1) : '') + String.fromCharCode(65 + i % 26);
+function isTrHeader(h) {
+  const l = curLang(), x = h.trim().toLowerCase();
+  return (l && x === l.name.toLowerCase()) || !!VOICES[x] || IMPORT_FIELDS[1].guess.test(x);
+}
+function looksLikeHeader(row) { return row.some(h => isTrHeader(h) || IMPORT_FIELDS.some(f => f.guess.test(h.trim()))); }
+function guessMapping(header, width) {
+  const map = { en: -1, tr: -1, tags: -1, note: -1, lang: -1 }, used = new Set();
+  const take = (k, i) => { if (i >= 0 && !used.has(i) && map[k] < 0) { map[k] = i; used.add(i); } };
+  if (header) {
+    const saved = pref.importMap || {};
+    for (const k in map) if (saved[k]) take(k, header.findIndex(h => h.toLowerCase() === saved[k].toLowerCase()));
+    for (const f of IMPORT_FIELDS) take(f.key, header.findIndex((h, i) => !used.has(i) && f.guess.test(h.trim())));
+    take('tr', header.findIndex((h, i) => !used.has(i) && isTrHeader(h)));
+  }
+  for (const k of ['en', 'tr']) if (map[k] < 0) take(k, [...Array(width).keys()].find(i => !used.has(i)) ?? -1);
+  return map;
+}
+function ensureLang(name) {
+  const hit = Object.entries(S.langs).find(([, l]) => l.name.toLowerCase() === name.toLowerCase());
+  if (hit) return hit[0];
+  const id = uid('l');
+  S.langs[id] = { name, color: LANG_COLORS[Object.keys(S.langs).length % LANG_COLORS.length], created: Date.now() };
+  return id;
+}
+function importSheet() {
+  let sheets = null, si = 0, hasHeader = true, map = null;
+  openSheet(`<div class="stack" style="gap:12px" id="imp">
+    <div class="sheet-head"><h3>Import a spreadsheet</h3><button type="button" class="icon-btn" data-act="close" aria-label="Close">${XICON}</button></div>
+    <div id="impBody"></div>
+  </div>`, sheet => {
+    const body = $('#impBody', sheet);
+    const pick = () => {
+      body.innerHTML = `<div class="stack" style="gap:12px">
+        <p class="muted" style="margin:0">Choose an Excel (.xlsx) or CSV file. You'll pick which column is English, which is ${esc(IMPORT_FIELDS[1].label())}, and so on.</p>
+        <label class="btn primary big" for="impFile">Choose a file</label>
+        <input type="file" id="impFile" accept=".csv,.tsv,.txt,.xlsx,.xls,.xlsm,.ods,.numbers,text/csv,text/tab-separated-values" hidden>
+        <p class="muted" style="margin:0;font-size:13px">From Google Sheets: File → Download → Microsoft Excel or CSV. From Numbers: Share → Export → Excel or CSV. Save the file to Files, then choose it here.</p>
+      </div>`;
+      $('#impFile', body).addEventListener('change', async e => {
+        const file = e.target.files[0]; if (!file) return;
+        body.innerHTML = '<p class="muted">Reading ' + esc(file.name) + '…</p>';
+        try { sheets = await readSpreadsheet(file); }
+        catch (err) {
+          pick();
+          toast(err && err.message === 'load' ? 'Connect to the internet once to import Excel files. CSV works offline.' : 'Couldn\'t read that file. Save it as .xlsx or .csv and try again.');
+          return;
+        }
+        if (!sheets.length) { pick(); toast('That file looks empty.'); return; }
+        sheets.fileName = file.name; si = 0; setSheet(); draw();
+      });
+    };
+    const rows = () => sheets[si].rows;
+    const width = () => Math.max(...rows().slice(0, 50).map(r => r.length));
+    const setSheet = () => { hasHeader = looksLikeHeader(rows()[0]); map = guessMapping(hasHeader ? rows()[0] : null, width()); };
+    const dataRows = () => rows().slice(hasHeader ? 1 : 0);
+    const cell = (r, k) => map[k] >= 0 ? (r[map[k]] || '').trim() : '';
+    const plan = () => {
+      const common = parseTags($('#impTags', body) ? $('#impTags', body).value : '');
+      const existing = new Set(Object.values(S.cards).map(c => (c.lang + '|' + c.en + '|' + c.tr).toLowerCase()));
+      const langIds = Object.fromEntries(Object.entries(S.langs).map(([id, l]) => [l.name.toLowerCase(), id]));
+      const out = { rows: [], missing: 0, dupes: 0, newLangs: new Set() };
+      for (const r of dataRows()) {
+        const en = cell(r, 'en'), tr = cell(r, 'tr');
+        if (!en || !tr) { out.missing++; continue; }
+        const ln = cell(r, 'lang');
+        const lkey = ln ? (langIds[ln.toLowerCase()] || 'new:' + ln.toLowerCase()) : pref.lang;
+        if (ln && !langIds[ln.toLowerCase()]) out.newLangs.add(ln);
+        const key = (lkey + '|' + en + '|' + tr).toLowerCase();
+        if (existing.has(key)) { out.dupes++; continue; }
+        existing.add(key);
+        out.rows.push({ en, tr, ln, note: cell(r, 'note'), tags: [...new Set(parseTags(cell(r, 'tags').replace(/[;|]/g, ',')).concat(common))] });
+      }
+      return out;
+    };
+    const colName = i => {
+      const h = hasHeader ? rows()[0][i] : '';
+      const sample = (dataRows().find(r => r[i]) || [])[i] || '';
+      return colLetter(i) + ': ' + (h || (sample ? '"' + (sample.length > 18 ? sample.slice(0, 18) + '…' : sample) + '"' : 'empty'));
+    };
+    const draw = () => {
+      const w = width(), l = curLang();
+      const opts = k => `<option value="-1">${IMPORT_FIELDS.find(f => f.key === k).req ? 'Choose a column' : 'Not used'}</option>` + [...Array(w).keys()].map(i => `<option value="${i}"${map[k] === i ? ' selected' : ''}>${esc(colName(i))}</option>`).join('');
+      body.innerHTML = `<div class="stack" style="gap:14px">
+        <div class="file-row"><span class="muted">${esc(sheets.fileName)}</span><button type="button" class="linkish" id="impAgain">Choose a different file</button></div>
+        ${sheets.length > 1 ? `<label>Sheet<select class="input" id="impSheet">${sheets.map((s, i) => `<option value="${i}"${i === si ? ' selected' : ''}>${esc(s.name)} (${s.rows.length} rows)</option>`).join('')}</select></label>` : ''}
+        <label class="check"><input type="checkbox" id="impHeader"${hasHeader ? ' checked' : ''}> First row is column names</label>
+        <div class="map-grid">
+          <span class="eyebrow">Field</span><span class="eyebrow">Column in your file</span>
+          ${IMPORT_FIELDS.map(f => `<span class="map-label">${esc(f.label())}${f.req ? ' <b class="req">*</b>' : ''}</span><select class="input" data-map="${f.key}" aria-label="${esc(f.label())} column">${opts(f.key)}</select>`).join('')}
+        </div>
+        <p class="muted" style="margin:0;font-size:13px">${map.lang >= 0 ? 'Each row goes into the language named in that column. New languages are created for you.' : `Words go into <b>${esc(l ? l.name : 'a new deck')}</b>. Map a Language column to import several languages at once.`} Separate multiple tags in one cell with commas.</p>
+        <label>Tags for every word (optional)<input class="input" id="impTags" autocomplete="off" placeholder="e.g. textbook ch 1"></label>
+        <div id="impPreview"></div>
+        <button type="button" class="btn primary big" id="impGo">Import</button>
+      </div>`;
+      $('#impAgain', body).addEventListener('click', pick);
+      const sel = $('#impSheet', body); if (sel) sel.addEventListener('change', e => { si = +e.target.value; setSheet(); draw(); });
+      $('#impHeader', body).addEventListener('change', e => { hasHeader = e.target.checked; map = guessMapping(hasHeader ? rows()[0] : null, width()); draw(); });
+      $$('[data-map]', body).forEach(s => s.addEventListener('change', e => {
+        const k = e.target.dataset.map, v = +e.target.value;
+        for (const other in map) if (other !== k && map[other] === v && v >= 0) map[other] = -1; // a column feeds one field
+        map[k] = v; draw();
+      }));
+      $('#impTags', body).addEventListener('input', preview);
+      $('#impGo', body).addEventListener('click', run);
+      preview();
+    };
+    const preview = () => {
+      const p = plan(), go = $('#impGo', body), l = curLang();
+      const ready = map.en >= 0 && map.tr >= 0 && (map.lang >= 0 || l);
+      const cols = IMPORT_FIELDS.filter(f => map[f.key] >= 0 || (f.key === 'tags' && p.rows.some(r => r.tags.length)));
+      $('#impPreview', body).innerHTML = !ready ? `<p class="impwarn">${!l && map.lang < 0 ? 'Add a language first, or map a Language column.' : 'Choose which columns hold English and ' + esc(IMPORT_FIELDS[1].label()) + '.'}</p>`
+        : `<div class="eyebrow" style="margin-bottom:6px">Preview</div>
+        <div class="preview-wrap"><table class="preview"><thead><tr>${cols.map(f => `<th>${esc(f.label())}</th>`).join('')}</tr></thead>
+        <tbody>${p.rows.slice(0, 5).map(r => `<tr>${cols.map(f => `<td>${esc(f.key === 'tags' ? r.tags.join(', ') : f.key === 'lang' ? r.ln : r[f.key])}</td>`).join('')}</tr>`).join('') || `<tr><td colspan="${cols.length}">No rows to import.</td></tr>`}</tbody></table></div>
+        <p class="muted" style="margin:8px 0 0;font-size:13px"><b>${p.rows.length}</b> word${p.rows.length === 1 ? '' : 's'} ready${p.dupes ? ` · ${p.dupes} already in your decks` : ''}${p.missing ? ` · ${p.missing} skipped (no English or ${esc(IMPORT_FIELDS[1].label())})` : ''}${p.newLangs.size ? ` · new language${p.newLangs.size > 1 ? 's' : ''}: ${esc([...p.newLangs].join(', '))}` : ''}</p>`;
+      go.disabled = !ready || !p.rows.length;
+      go.textContent = ready && p.rows.length ? `Import ${p.rows.length} word${p.rows.length === 1 ? '' : 's'}` : 'Import';
+    };
+    const run = () => {
+      const p = plan(); if (!p.rows.length) return;
+      const t0 = Date.now(); let firstLang = null;
+      p.rows.forEach((r, k) => {
+        const lang = r.ln ? ensureLang(r.ln) : pref.lang;
+        firstLang = firstLang || lang;
+        const nid = uid('c');
+        S.cards[nid] = normCard({ lang, en: r.en, tr: r.tr, tags: r.tags, note: r.note, created: t0 + k }, nid);
+      });
+      if (hasHeader) { const h = rows()[0], m = {}; for (const k in map) if (map[k] >= 0 && h[map[k]]) m[k] = h[map[k]]; pref.importMap = m; }
+      if (!S.langs[pref.lang]) pref.lang = firstLang;
+      savePref(); saveLocal(); checkAch(); closeSheet();
+      $('#view').innerHTML = ''; render();
+      toast(`Imported ${p.rows.length} word${p.rows.length === 1 ? '' : 's'}`);
+    };
+    pick();
   });
 }
 
@@ -733,6 +913,7 @@ document.addEventListener('click', e => {
     case 'add-word': wordSheet(null); break;
     case 'edit-word': wordSheet(a.dataset.id); break;
     case 'bulk': bulkSheet(); break;
+    case 'import': importSheet(); break;
     case 'add-tag': { const inp = $('#fTags'); const cur = parseTags(inp.value); if (!cur.includes(a.dataset.tag)) inp.value = cur.concat(a.dataset.tag).join(', '); break; }
     case 'del-word': {
       const box = $('#delConfirm'); const id = a.dataset.id;

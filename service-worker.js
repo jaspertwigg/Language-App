@@ -1,4 +1,4 @@
-const CACHE = "wordstack-v1";
+const CACHE = "wordstack-v2";
 const ASSETS = [
   "./",
   "./index.html",

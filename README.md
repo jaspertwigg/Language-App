@@ -21,6 +21,16 @@ offline.
 
   A tab also works as the separator, so two columns pasted from a
   spreadsheet go straight in.
+- **Import a spreadsheet** (Words → Spreadsheet): choose an Excel (.xlsx,
+  .xls, .ods) or CSV file, pick the sheet, then map your columns to
+  **English**, the **translation**, and optionally **Tags**, **Note** and
+  **Language**. Column names like "English", "Spanish", "Category" or
+  "Example" are matched automatically, and your last mapping is remembered.
+  Map a Language column to import several languages at once (new ones are
+  created). A preview shows the first rows, and duplicates and rows missing
+  English or a translation are skipped. Multiple tags in one cell can be
+  separated with commas or semicolons. From Google Sheets use File →
+  Download; from Numbers use Share → Export (Excel or CSV).
 - **Tested both ways.** English → language, language → English, or both.
   Each direction is tracked separately.
 - **Tags.** Practice every word, or pick one or more tags.
@@ -85,4 +95,6 @@ app.js                App logic: storage, scheduling, swiping, stats
 manifest.webmanifest  PWA metadata (name, icons, colours)
 service-worker.js     Offline caching (network-first)
 icons/                App icons for home screen
+vendor/               SheetJS (xlsx.full.min.js, Apache-2.0), loaded only
+                      when importing an Excel file
 ```

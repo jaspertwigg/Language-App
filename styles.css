@@ -69,7 +69,7 @@ h2 { font-family: var(--f-display); font-weight: 800; font-size: 24px; letter-sp
 h3 { font-family: var(--f-display); font-weight: 700; font-size: 17px; margin: 0; letter-spacing: -.01em; }
 .eyebrow { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); font-weight: 700; }
 .muted { color: var(--muted); }
-.stack { display: grid; gap: 16px; }
+.stack { display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr); }
 .panel { background: var(--paper); border-radius: 14px; padding: 16px; box-shadow: var(--shadow); }
 
 /* Practice setup */
@@ -207,9 +207,24 @@ textarea.input { min-height: 160px; resize: vertical; font-family: var(--f-mono)
 
 /* Sheet */
 .scrim { position: fixed; inset: 0; background: rgba(10,14,22,.45); z-index: 20; display: flex; align-items: flex-end; justify-content: center; animation: fade .2s ease; }
-.sheet { background: var(--desk); width: 100%; max-width: 560px; max-height: 88%; overflow-y: auto; border-radius: 18px 18px 0 0; padding: 18px 16px calc(20px + env(safe-area-inset-bottom, 0px)); display: grid; gap: 14px; animation: rise .25s cubic-bezier(.2,.8,.3,1); }
+.sheet { grid-template-columns: minmax(0, 1fr); background: var(--desk); width: 100%; max-width: 560px; max-height: 88%; overflow-y: auto; border-radius: 18px 18px 0 0; padding: 18px 16px calc(20px + env(safe-area-inset-bottom, 0px)); display: grid; gap: 14px; animation: rise .25s cubic-bezier(.2,.8,.3,1); }
 .sheet-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .sheet label { display: grid; gap: 6px; font-size: 13px; font-weight: 700; color: var(--muted); }
+.map-grid { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 12px; align-items: center; }
+.map-label { font-weight: 700; font-size: 14px; }
+.map-label .req { color: var(--miss); }
+select.input { appearance: none; -webkit-appearance: none; padding-right: 32px; background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%); background-position: calc(100% - 17px) 50%, calc(100% - 12px) 50%; background-size: 5px 5px; background-repeat: no-repeat; }
+.sheet label.check { display: flex; align-items: center; gap: 10px; font-size: 15px; font-weight: 400; color: var(--ink); }
+.check input { width: 20px; height: 20px; accent-color: var(--accent); }
+.file-row { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; font-size: 14px; }
+.file-row .muted { overflow-wrap: anywhere; min-width: 0; }
+.linkish { border: 0; background: none; color: var(--accent); padding: 0; font-weight: 700; font-size: 14px; }
+.preview-wrap { overflow-x: auto; border-radius: 10px; background: var(--paper); box-shadow: var(--shadow); }
+.preview { border-collapse: collapse; width: 100%; font-size: 13px; }
+.preview th, .preview td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; max-width: 180px; overflow: hidden; text-overflow: ellipsis; }
+.preview th { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.preview tr:last-child td { border-bottom: 0; }
+.impwarn { margin: 0; padding: 10px 12px; border-radius: 10px; background: var(--gold-soft); font-size: 14px; }
 .sheet .actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .sheet .actions .btn { flex: 1 1 auto; }
 .lang-item { display: flex; align-items: center; gap: 12px; padding: 10px 12px; background: var(--paper); border-radius: 12px; box-shadow: var(--shadow); }
